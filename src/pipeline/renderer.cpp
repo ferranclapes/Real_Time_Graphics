@@ -167,7 +167,7 @@ void Renderer::renderScene(SCN::Scene* scene, Camera* camera)
 	parseSceneEntities(scene, camera);
 
 	// ================= SHADOW PASS START =================
-	//	renderShadowMap();
+	renderShadowMap();
 	// ================= SHADOW PASS END ===================
 
 	//set the clear color (the background color)
@@ -198,13 +198,7 @@ void Renderer::renderShadowMap() {
 	shadow_fbo->bind();
 
 	glClear(GL_DEPTH_BUFFER_BIT);
-	glEnable(GL_DEPTH_TEST);
-	glDepthFunc(GL_LEQUAL);
-	glDepthMask(GL_TRUE);
-	//glColorMask(false, false, false, false); // Disable color writing
-
-	// Set viewport to shadow map resolution
-	glViewport(0, 0, shadow_fbo->width, shadow_fbo->height);
+	glColorMask(false, false, false, false); // Disable color writing
 
 	//================== TEMPORARY CODE =================
 	// Choose light (e.g., first directional or spotlight)
@@ -233,26 +227,8 @@ void Renderer::renderShadowMap() {
 	}
 
 
-	//// Read back depth buffer here
-	//int w = shadow_fbo->width;
-	//int h = shadow_fbo->height;
-
-	//unsigned int* depth_data = new unsigned int[w * h];
-	//glReadPixels(0, 0, w, h, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, depth_data);
-
-	//std::cout << "Depth data:" << std::endl;
-	//for (int i = 0; i < 10; ++i) {
-	//	float normalized = (float)depth_data[i] / 16777215.0f;
-	//	std::cout << i << "] = " << normalized << std::endl;
-	//}
-
-
-	//delete[] depth_data;
-
-
-	//glColorMask(true, true, true, true);
+	glColorMask(true, true, true, true);
 	shadow_fbo->unbind();
-	//glViewport(0, 0, , window_height); // Restore main screen resolution
 
 }
 
