@@ -64,6 +64,8 @@ namespace SCN {
 		float metallic_factor;	//how metallic is the surface
 		Vector3f emissive_factor;//does this object emit light?
 
+		float shininess = 32.0f;
+
 		//textures
 		Sampler textures[eTextureChannel::ALL];
 

@@ -1,4 +1,4 @@
-#pragma once
+	#pragma once
 
 #include "scene.h"
 
@@ -31,6 +31,10 @@ namespace SCN {
 
 		void configure(cJSON* json);
 		void serialize(cJSON* json);
+
+
+		//To get the camera from a light source
+		Camera getCameraFromLight(float fbo_width, float fbo_height);
 	};
 
 };

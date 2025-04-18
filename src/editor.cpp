@@ -325,10 +325,35 @@ void SceneEditor::inspectEntity(SCN::BaseEntity* entity)
 #endif
 }
 
+
+void SceneEditor::ParseMaterialsEntity(SCN::Node* node)
+{
+	if (node->material) {
+		selected_entities.push_back(node);
+	}
+	for (SCN::Node* child : node->children) {
+		ParseMaterialsEntity(child);
+	}
+}
 void SceneEditor::inspectEntity(SCN::PrefabEntity* entity)
 {
 #ifndef SKIP_IMGUI
 	this->inspectEntity((SCN::BaseEntity*)entity);
+
+	selected_entities.clear();
+
+	for (SCN::Node* child : entity->root.children) {
+		ParseMaterialsEntity(child);
+	}
+	
+	float shininess = selected_entities[0]->material->shininess;
+
+	ImGui::DragFloat("Shininess", &shininess, 0.1f, 0.1f, 100.0f);
+
+	for (SCN::Node* node : selected_entities) {
+		node->material->shininess = shininess;
+	}
+
 
 	ImGui::Separator();
 

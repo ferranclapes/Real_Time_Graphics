@@ -12,6 +12,7 @@
 #endif
 
 
+
 long getTime()
 {
 	#ifdef WIN32

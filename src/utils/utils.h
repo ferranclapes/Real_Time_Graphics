@@ -12,6 +12,8 @@
 
 #include "../core/includes.h"
 #include "../core/math.h"
+#include "../pipeline/renderer.h"
+
 
 //General functions **************
 long getTime(); //there is also CORE::getTime

@@ -23,6 +23,8 @@ public:
 	int sidebar_width;
 	bool show_textures;
 
+	std::vector<SCN::Node*> selected_entities;
+
 	SceneEditor(SCN::Scene* scene, SCN::Renderer* renderer);
 
 	void render( Camera* camera );
@@ -33,6 +35,8 @@ public:
 	void inspectEntity(SCN::PrefabEntity* entity);
 	void inspectEntity(SCN::LightEntity* entity);
 	void inspectEntity(SCN::UnknownEntity* entity);
+
+	void ParseMaterialsEntity(SCN::Node*);
 
 	void renderInList(SCN::BaseEntity* entity);
 	void renderInList(SCN::PrefabEntity* entity);
