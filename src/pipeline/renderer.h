@@ -24,6 +24,12 @@ namespace SCN {
 		Matrix44 model;
 	};
 
+	struct sShadowCaster {
+		GFX::Texture* shadow_map;
+		mat4 light_vp;
+		LightEntity* light;
+	};
+
 	// This class is in charge of rendering anything in our system.
 	// Separating the render from anything else makes the code cleaner
 	class Renderer
@@ -32,16 +38,18 @@ namespace SCN {
 		bool render_wireframe;
 		bool render_boundaries;
 		bool use_multipass;
+		bool ffc;
+		float shadow_bias = 0.0001f;
 
 		std::vector<SCN::sDrawCommand> draw_command_list;
 		std::vector<SCN::sDrawCommand> opaque_command_list;
 		std::vector<SCN::sDrawCommand> transparent_command_list;
 
-		std::vector<SCN::LightEntity*> lights_list;
-
 
 		//For shadowmaps:
 		GFX::FBO* shadow_fbo;
+		mat4 light_vp;
+		std::vector<SCN::sShadowCaster> shadow_casters;
 
 		GFX::Texture* skybox_cubemap;
 

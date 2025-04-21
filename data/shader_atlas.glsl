@@ -375,6 +375,11 @@ uniform float u_light_max[10];
 uniform float u_light_cone_max[10];	//FOR SPOT LIGHTS
 uniform float u_light_cone_min[10];		//FOR SPOT LIGHTS
 
+//FOR SHADOWS
+uniform sampler2D u_shadow_map[2];
+uniform mat4 u_light_vp[2];
+uniform float u_light_bias;
+
 uniform float u_material_shine;
 uniform vec3 u_camera_pos;
 
@@ -418,10 +423,15 @@ void main()
 	vec4 color = u_color;
 	color *= texture( u_texture, v_uv );
 
+	//======================== APPLY NORMAL MAP ==========================
 	vec3 texture_normal = texture( u_normal_texture, v_uv ).xyz;
 	texture_normal = (texture_normal * 2.0) - 1.0;
 	texture_normal = normalize(texture_normal);
 	vec3 normal = perturbNormal(normalize(v_normal), v_world_position, v_uv, texture_normal);
+	//====================================================================
+
+	
+	
 
 	vec3 light_component = vec3(0.0, 0.0, 0.0);
 
@@ -447,6 +457,17 @@ void main()
 
 
 		} else if (u_light_type[i] == 2) {								//SPOT
+
+			//======================== SHADOWS ==========================
+			vec4 shadow_coord = u_light_vp[0] * vec4(v_world_position, 1.0);
+			shadow_coord.z -= u_light_bias;		//Apply bias before dividing by w
+			shadow_coord /= shadow_coord.w;
+			vec2 shadow_uv = shadow_coord.xy * 0.5 + 0.5;
+			float current_depth = shadow_coord.z * 0.5 + 0.5;
+			float closest_depth = texture(u_shadow_map[0], shadow_uv).r;
+			float shadow = current_depth > closest_depth ? 0 : 1.0;
+			//==========================================================
+
 			float dist = distance(u_light_pos[i], v_world_position);
 			float attenuation = 1.0 / pow(dist, 2);
 			vec3 L = normalize(u_light_pos[i] - v_world_position);
@@ -461,27 +482,38 @@ void main()
 			float spot_intensity = u_light_int[i] * attenuation * cone_factor;
 
 			float l_dot_n = clamp(abs(dot(L, normal)), 0, 1.0);
-			light_component += spot_intensity * u_light_color[i] * l_dot_n;
+			light_component += spot_intensity * u_light_color[i] * l_dot_n * shadow;
 
 			//SPECULAR FACTOR
 			vec3 R = normalize(reflect(-L, normalize(normal)));
 			vec3 V = normalize(u_camera_pos - v_world_position);
 			float r_dot_v = clamp(dot(R, V), 0.0, 1.0);
 			float specular = pow(r_dot_v, u_material_shine);
-			light_component += specular * u_light_int[i] * attenuation * u_light_color[i];
+			light_component += specular * u_light_int[i] * attenuation * u_light_color[i] * shadow;
 
 
 		} else if (u_light_type[i] == 3) {								//DIRECTIONAL
+			//======================== SHADOWS ==========================
+			vec4 shadow_coord = u_light_vp[1] * vec4(v_world_position, 1.0);
+			shadow_coord.z -= u_light_bias;		//Apply bias before dividing by w
+			shadow_coord /= shadow_coord.w;
+			vec2 shadow_uv = shadow_coord.xy * 0.5 + 0.5;
+			float current_depth = shadow_coord.z * 0.5 + 0.5;
+			float closest_depth = texture(u_shadow_map[1], shadow_uv).r;
+			float shadow = current_depth > closest_depth ? 0 : 1.0;
+			//==========================================================
+
+
 			vec3 L = normalize(u_light_dir[i]);
 			float l_dot_n = clamp(dot(L,normalize(normal)), 0, 1);
-			light_component += u_light_int[i] * u_light_color[i] * l_dot_n;
+			light_component += u_light_int[i] * u_light_color[i] * l_dot_n * shadow;
 
 			//SPECULAR FACTOR
 			vec3 R = normalize(reflect(-L, normalize(normal)));
 			vec3 V = normalize(u_camera_pos - v_world_position);
 			float r_dot_v = clamp(dot(R, V), 0.0, 1.0);
 			float specular = pow(r_dot_v, u_material_shine);
-			light_component += specular * u_light_int[i] * u_light_color[i];
+			light_component += specular * u_light_int[i] * u_light_color[i] * shadow;
 		}
 
 
@@ -773,5 +805,13 @@ void main()
 
 \plain.fs
 #version 330 core
+
+uniform sampler2D u_texture;
+in vec2 v_uv;
+
 void main() {
+	float alpha = texture(u_texture, v_uv).a;
+	if(alpha == 0.0){
+		discard;
+	}
 }

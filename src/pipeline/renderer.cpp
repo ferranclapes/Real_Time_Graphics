@@ -83,16 +83,12 @@ void Renderer::parseNode(SCN::Node* node, Camera* cam) {
 }
 
 void Renderer::parseSceneEntities(SCN::Scene* scene, Camera* cam) {
-	// HERE =====================
-	// TODO: GENERATE RENDERABLES
-	// ==========================
 
 	draw_command_list.clear();
 	opaque_command_list.clear();
 	transparent_command_list.clear();
-
-
-	lights_list.clear();
+	
+	shadow_casters.clear();
 
 	for (int i = 0; i < scene->entities.size(); i++) {
 		BaseEntity* entity = scene->entities[i];
@@ -110,15 +106,13 @@ void Renderer::parseSceneEntities(SCN::Scene* scene, Camera* cam) {
 		else if (entity->getType() == eEntityType::LIGHT) {
 			LightEntity* light_entt = (LightEntity*)entity;
 
-			lights_list.push_back(light_entt);
+			SCN::sShadowCaster shadow_caster;
+			shadow_caster.shadow_map = nullptr;
+			shadow_caster.light = light_entt;
+
+
+			shadow_casters.push_back(shadow_caster);
 		}
-
-		// Store Prefab Entitys
-		// ...
-		//		Store Children Prefab Entities
-
-		// Store Lights
-		// ...
 	}
 
 	orderDrawCommands(cam);
@@ -179,7 +173,7 @@ void Renderer::renderScene(SCN::Scene* scene, Camera* camera)
 
 	//render skybox
 	if(skybox_cubemap)
-		//renderSkybox(skybox_cubemap);
+		renderSkybox(skybox_cubemap);
 
 	// ================= RENDER PREFAB ENTITIES =================
 	renderRenderable();
@@ -196,37 +190,40 @@ void Renderer::renderShadowMap() {
 
 	//Bind the FBO for shadow rendering
 	shadow_fbo->bind();
-
-	glClear(GL_DEPTH_BUFFER_BIT);
+	if(ffc) {
+		glEnable(GL_CULL_FACE);
+	}
+	glEnable(GL_DEPTH_TEST);
+	glFrontFace(GL_CW);
 	glColorMask(false, false, false, false); // Disable color writing
 
-	//================== TEMPORARY CODE =================
-	// Choose light (e.g., first directional or spotlight)
-	LightEntity* light = nullptr;
-	for (auto l : lights_list) {
-		if (l->light_type == eLightType::DIRECTIONAL) {
-			light = l;
-			break;
+	for (int i = 0; i < shadow_casters.size(); i++) {
+		glClear(GL_DEPTH_BUFFER_BIT);
+		LightEntity* light = shadow_casters[i].light;
+		if (light->light_type == eLightType::POINT){	//SHADOWS NOT SUPORTED FOR POINT LIGHTS YET
+			continue;
 		}
+
+		//Create the light camera
+		Camera light_camera;
+		light_camera = light->getCameraFromLight(shadow_fbo->width, shadow_fbo->height);
+		//Camera::current = &light_camera;
+
+		// Save this light VP matrix for the main shader
+		shadow_casters[i].light_vp = light_camera.viewprojection_matrix;
+
+		// Render all opaque geometry to depth
+		for (sDrawCommand command : opaque_command_list) {
+			renderPlain(light_camera, command.model, command.mesh, command.material);
+		}
+
+		shadow_casters[i].shadow_map = shadow_fbo->depth_texture;
+		
 	}
-	if (!light)
-		return;
-	//===================================================
-
-	//Create the light camera
-	Camera light_camera;
-	light_camera = light->getCameraFromLight(shadow_fbo->width, shadow_fbo->height);
-	//Camera::current = &light_camera;
-
-	// Save this light VP matrix for the main shader
-	mat4 light_viewproj_matrix = light_camera.viewprojection_matrix;
-
-	// Render all opaque geometry to depth
-	for(sDrawCommand command : opaque_command_list) {
-		renderPlain(light_camera, command.model, command.mesh, command.material);
+	if (ffc) {
+		glDisable(GL_CULL_FACE);
 	}
-
-
+	glFrontFace(GL_CCW);
 	glColorMask(true, true, true, true);
 	shadow_fbo->unbind();
 
@@ -240,7 +237,8 @@ void Renderer::renderPlain(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SC
 	plain_shader->enable();
 
 	plain_shader->setUniform("u_model", model);
-	plain_shader->setUniform("u_viewprojection", light_cam.viewprojection_matrix);
+	plain_shader->setUniform("u_viewprojection", light_cam.viewprojection_matrix); 
+	plain_shader->setUniform("u_texture", material->textures[ALBEDO].texture);
 	mesh->render(GL_TRIANGLES);
 
 
@@ -332,21 +330,24 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 	material->bind(shader);
 
 	//Sending the lights
-	vec3* light_pos = new vec3[lights_list.size()];
-	vec3* light_color = new vec3[lights_list.size()];
-	float* light_int = new float[lights_list.size()];
-	vec3* light_dir = new vec3[lights_list.size()];
-	int* light_type = new int[lights_list.size()];
-	float* light_min = new float[lights_list.size()];
-	float* light_max = new float[lights_list.size()];
-	float* light_cone_max = new float[lights_list.size()]; //for spot lights
-	float* light_cone_min = new float[lights_list.size()]; //for spot lights
+	vec3* light_pos = new vec3[shadow_casters.size()];
+	vec3* light_color = new vec3[shadow_casters.size()];
+	float* light_int = new float[shadow_casters.size()];
+	vec3* light_dir = new vec3[shadow_casters.size()];
+	int* light_type = new int[shadow_casters.size()];
+	float* light_min = new float[shadow_casters.size()];
+	float* light_max = new float[shadow_casters.size()];
+	float* light_cone_max = new float[shadow_casters.size()]; //for spot lights
+	float* light_cone_min = new float[shadow_casters.size()]; //for spot lights
+
+	//Send the info of the shadows too
+	mat4* light_vp = new mat4[shadow_casters.size()];
+	GFX::Texture** shadow_map = new GFX::Texture*[shadow_casters.size()];
 
 	int i = 0;
-	for (LightEntity* light : lights_list) {
-		if (light->light_type != eLightType::POINT){
-			//continue;
-		}
+	int j = 0;
+	for (sShadowCaster s : shadow_casters) {
+		LightEntity* light = s.light;
 		light_pos[i] = light->root.getGlobalMatrix().getTranslation();
 		light_color[i] = light->color;
 		light_int[i] = light->intensity;
@@ -356,20 +357,26 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 		light_max[i] = light->max_distance;
 		light_cone_max[i] = cos((light->cone_info.y * PI)/180);
 		light_cone_min[i] = cos((light->cone_info.x * PI) / 180);
+		if(light->light_type != eLightType::POINT) {
+			light_vp[j] = s.light_vp;
+			shadow_map[j] = s.shadow_map;
+			j++;
+		}
+
 		i++;
 	}
 
-	shader->setUniform3Array("u_light_pos", (float*) light_pos, min(lights_list.size(), 10));
-	shader->setUniform3Array("u_light_color", (float*) light_color, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_int", (float*) light_int, min(lights_list.size(), 10));
-	shader->setUniform3Array("u_light_dir", (float*) light_dir, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_type", (int*) light_type, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_min", (float*) light_min, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_max", (float*) light_max, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_cone_max", (float*) light_cone_max, min(lights_list.size(), 10));
-	shader->setUniform1Array("u_light_cone_min", (float*) light_cone_min, min(lights_list.size(), 10));
+	shader->setUniform3Array("u_light_pos", (float*) light_pos, min(shadow_casters.size(), 10));
+	shader->setUniform3Array("u_light_color", (float*) light_color, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_int", (float*) light_int, min(shadow_casters.size(), 10));
+	shader->setUniform3Array("u_light_dir", (float*) light_dir, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_type", (int*) light_type, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_min", (float*) light_min, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_max", (float*) light_max, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_cone_max", (float*) light_cone_max, min(shadow_casters.size(), 10));
+	shader->setUniform1Array("u_light_cone_min", (float*) light_cone_min, min(shadow_casters.size(), 10));
 	shader->setUniform3("u_light_ambient", scene->ambient_light.x, scene->ambient_light.y, scene->ambient_light.z);
-	shader->setUniform1("u_light_count", (int) min(lights_list.size(), 10));
+	shader->setUniform1("u_light_count", (int) min(shadow_casters.size(), 10));
 
 	//For specular factor:
 	shader->setUniform1("u_material_shine", material->shininess);
@@ -385,9 +392,19 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 	delete[] light_cone_max;
 	delete[] light_cone_min;
 
+	//For shadow maps:
+	if (shadow_fbo && shadow_fbo->depth_texture) {
+		//shader->setUniform("u_shadow_map[0]", shadow_map[0], 2);
+		shader->setUniform("u_shadow_map[1]", shadow_map[1], 3);
+		//shader->setUniform("u_shadow_map[1]", shadow_fbo->depth_texture, 3);
+		shader->setMatrix44Array("u_light_vp", light_vp, 2);
+		shader->setUniform("u_light_bias", shadow_bias);
+	}
+
+	delete[] light_vp;
 
 
-	//upload uniforms
+	//For normal maps:
 	shader->setUniform("u_model", model);
 	if (material->textures[NORMALMAP].texture) {
 		shader->setUniform("u_normal_texture", material->textures[NORMALMAP].texture, 1);
@@ -445,7 +462,8 @@ void Renderer::renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* 
 
 	//Sending the lights
 	bool is_first_pass = true;
-	for (LightEntity* light : lights_list) {
+	for (sShadowCaster s : shadow_casters) {
+		LightEntity* light = s.light;
 		if (!is_first_pass) {		//If we aren't in the first light, we enable blending and disable depth writing
 			glEnable(GL_BLEND);
 			glBlendFunc(GL_ONE, GL_ONE);
@@ -518,6 +536,8 @@ void Renderer::showUI()
 	//...
 
 	ImGui::Checkbox("Multipass", &use_multipass);
+	ImGui::Checkbox("Forward Facing Culling", &ffc);
+	ImGui::DragFloat("Shadow Bias", &shadow_bias, 0.0001f, 0.0f, 0.5f, "%.0001f");
 }
 
 #else

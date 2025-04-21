@@ -84,6 +84,9 @@ Camera SCN::LightEntity::getCameraFromLight(float fbo_width, float fbo_height)
 		cam.setPerspective(this->cone_info.y * 2.0f, aspect, //the aspect ratio of the FBO
 			this->near_distance, this->max_distance);
 	}
+	else if (this->light_type == SCN::eLightType::POINT) {
+		return cam;
+	}
 
 	return cam;
 }
