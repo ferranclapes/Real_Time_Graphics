@@ -7,8 +7,10 @@ multi basic.vs multi.fs
 singlepass basic.vs singlepass.fs
 normalmap basic.vs normalmap.fs
 multipass basic.vs multipass.fs
-debug basic.vs debug.fs
 plain basic.vs plain.fs
+geometry basic.vs gbuffer_fill.fs
+lightpass basic.vs lightpass.fs
+debug basic.vs debug.fs
 compute test.cs
 
 \test.cs
@@ -229,6 +231,8 @@ void main()
 	//calcule the position of the vertex using the matrices
 	gl_Position = u_viewprojection * vec4( v_world_position, 1.0 );
 }
+
+//========================================================================================================================
 
 \singlepass.fs
 
@@ -675,9 +679,98 @@ void main()
 
 
 
+\plain.fs
+#version 330 core
 
-\debug.fs
+uniform sampler2D u_texture;
+in vec2 v_uv;
 
+void main() {
+	float alpha = texture(u_texture, v_uv).a;
+	if(alpha == 0.0){
+		discard;
+	}
+}
+
+//========================================================================================================================
+
+\gbuffer_fill.fs
+#version 330 core
+
+in vec3 v_position;
+in vec3 v_world_position;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec4 v_color;
+
+uniform vec4 u_color;
+uniform sampler2D u_texture;
+uniform sampler2D u_normal_texture;
+uniform float u_time;
+uniform float u_alpha_cutoff;
+
+
+uniform float u_material_shine;
+uniform vec3 u_camera_pos;
+
+layout(location = 0) out vec4 gbuffer_albedo;
+layout(location = 1) out vec4 gbuffer_normal_mat;
+out vec4 FragColor;
+
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    T = normalize(T);
+    B = normalize(B);
+    N = normalize(N);
+
+    mat3 tbn = mat3(T, B, N);
+    
+    // Ensure right-handed TBN
+    if (dot(cross(T, B), N) < 0.0)
+        tbn[2] = -tbn[2]; // flip Z to fix handedness
+
+    return tbn;
+}
+
+
+vec3 perturbNormal(vec3 N, vec3 WP, vec2 uv, vec3 normal_pixel) {
+	//normal_pixel = normal_pixel * 255./127. - 128./127.;
+	mat3 TBN = cotangentFrame(N, WP, uv);
+	return normalize(TBN * normal_pixel);
+}
+
+
+void main()
+{
+    vec4 color = u_color * texture(u_texture, v_uv);
+
+    vec3 texture_normal = texture(u_normal_texture, v_uv).xyz;
+    texture_normal = (texture_normal * 2.0) - 1.0;
+    texture_normal = normalize(texture_normal);
+    vec3 normal = perturbNormal(normalize(v_normal), v_world_position, v_uv, texture_normal);
+
+    if(color.a < u_alpha_cutoff) {
+        //discard;
+    }
+
+    gbuffer_albedo = vec4(color.rgb, 1.0); // store only the color
+	gbuffer_normal_mat = vec4(normalize(v_normal) * 0.5 + 0.5, 1.0); // store normal encoded in 0..1 range
+
+	FragColor = vec4(vec3(gl_FragCoord.z), 1.0);
+}
+
+//========================================================================================================================
+
+\lightpass.fs
 #version 330 core
 
 in vec3 v_position;
@@ -709,25 +802,88 @@ uniform float u_light_cone_min[10];		//FOR SPOT LIGHTS
 uniform float u_material_shine;
 uniform vec3 u_camera_pos;
 
+//FROM THE DEFERRED RENDERING
+uniform vec2 u_res_inv;
+uniform mat4 u_inv_vp_mat;
+uniform sampler2D u_gbuffer_albedo;
+uniform sampler2D u_gbuffer_normal;
+uniform sampler2D u_gbuffer_depth;
+
 out vec4 FragColor;
 
-mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
-  // get edge vectors of the pixel triangle
-  vec3 dp1 = dFdx(p);
-  vec3 dp2 = dFdy(p);
-  vec2 duv1 = dFdx(uv);
-  vec2 duv2 = dFdy(uv);
+void main()
+{
 
-  // solve the linear system
-  vec3 dp2perp = cross(dp2, N);
-  vec3 dp1perp = cross(N, dp1);
-  vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-  vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+	vec2 uv = gl_FragCoord.xy * u_res_inv;
 
-  // construct a scale-invariant frame 
-  float invmax = inversesqrt(max(dot(T,T), dot(B,B)));
-  return mat3( normalize(T * invmax), normalize(B * invmax), N);
+	float depth = texture(u_gbuffer_depth, uv).r;
+	float depth_clip = depth * 2.0 - 1.0;
+
+	vec2 uv_clip = uv * 2.0 - 1.0;
+	vec4 clip_coords = vec4(uv_clip.x, uv_clip.y, depth_clip, 1.0);
+
+	vec4 not_norm_w_p = u_inv_vp_mat * clip_coords;
+	vec3 world_pos = not_norm_w_p.xyz / not_norm_w_p.w;
+
+	FragColor = vec4(vec3(depth), 1.0);
+
+
+	
 }
+
+
+
+
+
+
+//========================================================================================================================
+
+\debug.fs
+#version 330 core
+
+in vec3 v_position;
+in vec3 v_world_position;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec4 v_color;
+
+uniform vec4 u_color;
+uniform sampler2D u_texture;
+uniform sampler2D u_normal_texture;
+uniform float u_time;
+uniform float u_alpha_cutoff;
+
+
+uniform float u_material_shine;
+uniform vec3 u_camera_pos;
+
+layout(location = 0) out vec4 gbuffer_albedo;
+layout(location = 1) out vec4 gbuffer_normal_mat;
+
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    T = normalize(T);
+    B = normalize(B);
+    N = normalize(N);
+
+    mat3 tbn = mat3(T, B, N);
+    
+    // Ensure right-handed TBN
+    if (dot(cross(T, B), N) < 0.0)
+        tbn[2] = -tbn[2]; // flip Z to fix handedness
+
+    return tbn;
+}
+
 
 vec3 perturbNormal(vec3 N, vec3 WP, vec2 uv, vec3 normal_pixel) {
 	//normal_pixel = normal_pixel * 255./127. - 128./127.;
@@ -735,83 +891,20 @@ vec3 perturbNormal(vec3 N, vec3 WP, vec2 uv, vec3 normal_pixel) {
 	return normalize(TBN * normal_pixel);
 }
 
+
 void main()
 {
+    vec4 color = u_color * texture(u_texture, v_uv);
 
-	vec2 uv = v_uv;
-	vec4 color = u_color;
-	color *= texture( u_texture, v_uv );
+    vec3 texture_normal = texture(u_normal_texture, v_uv).xyz;
+    texture_normal = (texture_normal * 2.0) - 1.0;
+    texture_normal = normalize(texture_normal);
+    vec3 normal = perturbNormal(normalize(v_normal), v_world_position, v_uv, texture_normal);
 
-	vec3 texture_normal = texture( u_normal_texture, v_uv ).xyz;
-	texture_normal = (texture_normal * 2.0) - 1.0;
-	texture_normal = normalize(texture_normal);
-	vec3 normal = perturbNormal(normalize(v_normal), v_world_position, v_uv, texture_normal);
+    if(color.a < u_alpha_cutoff) {
+        //discard;
+    }
 
-	vec3 light_component = vec3(0.0, 0.0, 0.0);
-
-	light_component += u_light_ambient * color.rgb;
-
-	for(int i = 0; i < u_light_count; i++){
-
-		if(u_light_type[i] == 1) {										//POINT
-			float dist = distance(u_light_pos[i], v_world_position);
-			float attenuation = 1.0 / pow(dist, 2);
-			vec3 L = normalize(u_light_pos[i] - v_world_position);
-
-			float l_dot_n = clamp(dot(L,normalize(normal)), 0.0, 1.0);
-			if(dot(L,normalize(normal)) < 0.0){
-				//light_component += vec3(1.0, 0, 0);
-			}
-			else{
-				//light_component += dot(L,normalize(normal));
-			}
-			light_component += normal;
-
-
-
-		} else if (u_light_type[i] == 2) {								//SPOT
-			float dist = distance(u_light_pos[i], v_world_position);
-			float attenuation = 1.0 / pow(dist, 2);
-			vec3 L = normalize(u_light_pos[i] - v_world_position);
-			vec3 D = normalize(u_light_dir[i]);
-
-			if(dot(L, D) < u_light_cone_max[i]) {	//check if the pixel is within the cone
-				continue;
-			}
-
-			float cone_factor = (clamp(dot(L, D) , 0.0, 1.0) - (u_light_cone_max[i])) / (u_light_cone_min[i] - u_light_cone_max[i]);
-
-			float spot_intensity = u_light_int[i] * attenuation * cone_factor;
-
-			float l_dot_n = clamp(dot(L, normal), 0, 1.0);
-			//light_component += l_dot_n;
-
-
-		} else if (u_light_type[i] == 3) {								//DIRECTIONAL
-			continue;
-		}
-
-
-		
-	}
-
-	if(color.a < u_alpha_cutoff) {
-		discard;
-	}
-
-	vec3 lit_color = light_component;
-	FragColor = vec4(lit_color, color.a);
-}
-
-\plain.fs
-#version 330 core
-
-uniform sampler2D u_texture;
-in vec2 v_uv;
-
-void main() {
-	float alpha = texture(u_texture, v_uv).a;
-	if(alpha == 0.0){
-		discard;
-	}
+    gbuffer_albedo = vec4(vec3(gl_FragCoord.z), 1.0); // store only the color
+	gbuffer_normal_mat = vec4(normalize(v_normal) * 0.5 + 0.5, 1.0); // store normal encoded in 0..1 range
 }

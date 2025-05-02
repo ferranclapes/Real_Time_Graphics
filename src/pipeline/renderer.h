@@ -40,16 +40,27 @@ namespace SCN {
 		bool use_multipass;
 		bool ffc;
 		float shadow_bias = 0.0001f;
+		bool deferred_rendering = true;
 
 		std::vector<SCN::sDrawCommand> draw_command_list;
 		std::vector<SCN::sDrawCommand> opaque_command_list;
 		std::vector<SCN::sDrawCommand> transparent_command_list;
 
 
-		//For shadowmaps:
+		//================ SHADOWS =========================
 		GFX::FBO* shadow_fbo;
+		GFX::FBO* shadow_fbo_spot;
 		mat4 light_vp;
+		mat4 light_vp_spot;
 		std::vector<SCN::sShadowCaster> shadow_casters;
+
+		//==================================================
+
+
+		//================ DEFERRED RENDERING ==========================
+		GFX::FBO* gbuffer_fbo;
+
+		//==============================================================
 
 		GFX::Texture* skybox_cubemap;
 
@@ -72,6 +83,11 @@ namespace SCN {
 
 		//renders several elements of the scene
 		void renderScene(SCN::Scene* scene, Camera* camera);
+		void renderSceneForward(SCN::Scene* scene, Camera* camera);
+		void renderSceneDeferred(SCN::Scene* scene, Camera* camera);
+
+		void geometryPass(Camera* camera);
+		void lightPass(Camera* camera);
 
 		void renderRenderable();
 		void renderShadowMap();
@@ -83,6 +99,8 @@ namespace SCN {
 		//to render one mesh given its material and transformation matrix
 		void renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
 		void renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
+
+		void renderMeshWithMaterialGeometry(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
 
 		void showUI();
 	};
