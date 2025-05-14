@@ -40,7 +40,8 @@ namespace SCN {
 		bool use_multipass;
 		bool ffc;
 		float shadow_bias = 0.0001f;
-		bool deferred_rendering = true;
+		bool deferred_rendering = false;
+		bool use_pbr = true;
 
 		std::vector<SCN::sDrawCommand> draw_command_list;
 		std::vector<SCN::sDrawCommand> opaque_command_list;
@@ -88,6 +89,7 @@ namespace SCN {
 
 		void geometryPass(Camera* camera);
 		void lightPass(Camera* camera);
+		void lightPassDebug(Camera* camera);
 
 		void renderRenderable();
 		void renderShadowMap();
@@ -95,6 +97,7 @@ namespace SCN {
 
 		//render the skybox
 		void renderSkybox(GFX::Texture* cubemap);
+		void renderSkyboxDeferred(GFX::Texture* cubemap);
 
 		//to render one mesh given its material and transformation matrix
 		void renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);

@@ -34,12 +34,12 @@ Renderer::Renderer(const char* shader_atlas_filename)
 
 	use_multipass = false;
 	shadow_fbo = new GFX::FBO();
-	shadow_fbo->setDepthOnly(1024, 1024);
+	shadow_fbo->setDepthOnly(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height);
 	shadow_fbo_spot = new GFX::FBO();
-	shadow_fbo_spot->setDepthOnly(1024, 1024);
+	shadow_fbo_spot->setDepthOnly(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height);
 
 	gbuffer_fbo = new GFX::FBO();
-	gbuffer_fbo->create(1024, 768, 2, GL_RGBA, GL_UNSIGNED_BYTE, true);
+	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 2, GL_RGBA, GL_UNSIGNED_BYTE, true);
 
 	if (!GFX::Shader::LoadAtlas(shader_atlas_filename))
 		exit(1);
@@ -166,9 +166,11 @@ void Renderer::orderDrawCommands(Camera* cam) {
 void Renderer::renderScene(SCN::Scene* scene, Camera* camera)
 {
 	if (deferred_rendering) {
+		shadow_bias = 0.0003f;
 		renderSceneDeferred(scene, camera);
 	}
-	else {
+	else if(!deferred_rendering) {
+		shadow_bias = 0.0001f;
 		renderSceneForward(scene, camera);
 	}
 }
@@ -274,6 +276,7 @@ void Renderer::renderPlain(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SC
 	plain_shader->disable();
 }
 
+
 //================= DEFERRED RENDERING ================
 
 void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
@@ -281,11 +284,15 @@ void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
 	setupScene();
 	parseSceneEntities(scene, camera);
 
+	renderShadowMap();
+
+	//render skybox
+	if (skybox_cubemap)
+		renderSkyboxDeferred(skybox_cubemap);
+
 	geometryPass(camera);
 
-	gbuffer_fbo->color_textures[0]->toViewport();
-
-	//lightPass(camera);
+	lightPass(camera);
 }
 
 void Renderer::geometryPass(Camera* camera) {
@@ -329,6 +336,10 @@ void Renderer::lightPass(Camera* camera) {
 	float* light_cone_max = new float[shadow_casters.size()]; //for spot lights
 	float* light_cone_min = new float[shadow_casters.size()]; //for spot lights
 
+	//Send the info of the shadows too
+	mat4* light_vp = new mat4[shadow_casters.size()];
+	GFX::Texture** shadow_map = new GFX::Texture * [shadow_casters.size()];
+
 
 	int i = 0;
 	int j = 0;
@@ -343,7 +354,11 @@ void Renderer::lightPass(Camera* camera) {
 		light_max[i] = light->max_distance;
 		light_cone_max[i] = cos((light->cone_info.y * PI) / 180);
 		light_cone_min[i] = cos((light->cone_info.x * PI) / 180);
-		
+		if (light->light_type != eLightType::POINT) {
+			light_vp[j] = s.light_vp;
+			shadow_map[j] = s.shadow_map;
+			j++;
+		}
 		i++;
 	}
 
@@ -373,14 +388,23 @@ void Renderer::lightPass(Camera* camera) {
 	delete[] light_cone_max;
 	delete[] light_cone_min;
 
-
 	//Bind the Gbuffers
-	shader->setTexture("u_gbuffer_color", gbuffer_fbo->color_textures[0], 4);
+	shader->setTexture("u_gbuffer_albedo", gbuffer_fbo->color_textures[0], 4);
 	shader->setTexture("u_gbuffer_normal", gbuffer_fbo->color_textures[1], 5);
 	shader->setTexture("u_gbuffer_depth", gbuffer_fbo->depth_texture, 6);
 
-	shader->setUniform("u_res_inv", vec2(1.0f / gbuffer_fbo->width, 1.0f / gbuffer_fbo->height));
+	shader->setUniform("u_res_inv", vec2(1.0f / CORE::BaseApplication::instance->window_width, 1.0f / CORE::BaseApplication::instance->window_height));
 	shader->setMatrix44("u_inv_vp_mat", camera->inverse_viewprojection_matrix);
+
+	//For shadow maps:
+	if (shadow_fbo && shadow_fbo->depth_texture) {
+		shader->setUniform("u_shadow_map[0]", shadow_map[0], 2);
+		shader->setUniform("u_shadow_map[1]", shadow_map[1], 3);
+		shader->setMatrix44Array("u_light_vp", light_vp, 2);
+		shader->setUniform("u_light_bias", shadow_bias);
+	}
+
+	delete[] light_vp;
 
 	quad->render(GL_TRIANGLES);
 
@@ -404,7 +428,7 @@ void Renderer::renderMeshWithMaterialGeometry(const Matrix44 model, GFX::Mesh* m
 	glColorMask(true, true, true, true);
 
 	//chose a shader
-	shader = GFX::Shader::Get("debug");
+	shader = GFX::Shader::Get("geometry");
 
 	assert(glGetError() == GL_NO_ERROR);
 
@@ -509,7 +533,12 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 	glEnable(GL_DEPTH_TEST);
 
 	//chose a shader
-	shader = GFX::Shader::Get("normalmap");
+	if (!use_pbr) {
+		shader = GFX::Shader::Get("normalmap");
+	}
+	else {
+		shader = GFX::Shader::Get("forward_PBR");
+	}
 
 	assert(glGetError() == GL_NO_ERROR);
 
@@ -757,6 +786,50 @@ void Renderer::renderSkybox(GFX::Texture* cubemap)
 	glEnable(GL_DEPTH_TEST);
 }
 
+void Renderer::renderSkyboxDeferred(GFX::Texture* cubemap) {
+	Camera* camera = Camera::current;
+
+	// Apply skybox necesarry config:
+	// No blending, no dpeth test, we are always rendering the skybox
+	// Set the culling aproppiately, since we just want the back faces
+	glDisable(GL_BLEND);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+
+	if (render_wireframe)
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+	GFX::Shader* shader = GFX::Shader::Get("deferredskybox");
+	if (!shader)
+		return;
+	shader->enable();
+
+	// Center the skybox at the camera, with a big sphere
+	Matrix44 m;
+	m.setTranslation(camera->eye.x, camera->eye.y, camera->eye.z);
+	m.scale(10, 10, 10);
+	shader->setUniform("u_model", m);
+
+	// Upload camera uniforms
+	shader->setUniform("u_viewprojection", camera->viewprojection_matrix);
+	shader->setUniform("u_camera_position", camera->eye);
+
+	shader->setUniform("u_texture", cubemap, 0);
+
+	shader->setTexture("u_gbuffer_depth", gbuffer_fbo->depth_texture, 6);
+
+	shader->setUniform("u_res_inv", vec2(1.0f / CORE::BaseApplication::instance->window_width, 1.0f / CORE::BaseApplication::instance->window_height));
+	shader->setMatrix44("u_inv_vp_mat", camera->inverse_viewprojection_matrix);
+
+	sphere.render(GL_TRIANGLES);
+
+	shader->disable();
+
+	// Return opengl state to default
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	glEnable(GL_DEPTH_TEST);
+}
+
 
 #ifndef SKIP_IMGUI
 
@@ -774,6 +847,7 @@ void Renderer::showUI()
 	ImGui::Checkbox("Multipass", &use_multipass);
 	ImGui::Checkbox("Forward Facing Culling", &ffc);
 	ImGui::DragFloat("Shadow Bias", &shadow_bias, 0.0001f, 0.0f, 0.5f, "%.0001f");
+	ImGui::Checkbox("Physically Based Renderer", &use_pbr);
 }
 
 #else
