@@ -39,7 +39,7 @@ Renderer::Renderer(const char* shader_atlas_filename)
 	shadow_fbo_spot->setDepthOnly(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height);
 
 	gbuffer_fbo = new GFX::FBO();
-	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 2, GL_RGBA, GL_UNSIGNED_BYTE, true);
+	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 3, GL_RGBA, GL_UNSIGNED_BYTE, true);
 
 	if (!GFX::Shader::LoadAtlas(shader_atlas_filename))
 		exit(1);
@@ -513,7 +513,7 @@ void Renderer::renderRenderable() {
 	}
 	else {
 		for (sDrawCommand command : draw_command_list) {
-			renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
+			 renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
 		}
 	}
 }
@@ -534,10 +534,10 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 
 	//chose a shader
 	if (!use_pbr) {
-		shader = GFX::Shader::Get("normalmap");
+		shader = GFX::Shader::Get("forward_singlepass");
 	}
 	else {
-		shader = GFX::Shader::Get("forward_PBR");
+		shader = GFX::Shader::Get("forward_PBR_singlepass");
 	}
 
 	assert(glGetError() == GL_NO_ERROR);
@@ -548,6 +548,11 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 	shader->enable();
 
 	material->bind(shader);
+	//bind the metallic_roughness texture if we are using PBR
+	if (use_pbr) {
+		if (material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture != NULL)
+			shader->setUniform("u_metallic_roughness_texture", material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture, 4);
+	}
 
 	//Sending the lights
 	vec3* light_pos = new vec3[shadow_casters.size()];
@@ -668,7 +673,12 @@ void Renderer::renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* 
 
 
 	//chose a shader
-	shader = GFX::Shader::Get("multipass");
+	if (!use_pbr) {
+		shader = GFX::Shader::Get("forward_multipass");
+	}
+	else {
+		shader = GFX::Shader::Get("forward_PBR_multipass");
+	}
 
 	assert(glGetError() == GL_NO_ERROR);
 
@@ -678,6 +688,11 @@ void Renderer::renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* 
 	shader->enable();
 
 	material->bind(shader);
+	//bind the metallic_roughness texture if we are using PBR
+	if (use_pbr) {
+		if (material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture != NULL)
+			shader->setUniform("u_metallic_roughness_texture", material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture, 4);
+	}
 
 	//Sending the lights
 	bool is_first_pass = true;
