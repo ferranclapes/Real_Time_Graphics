@@ -39,8 +39,13 @@ Renderer::Renderer(const char* shader_atlas_filename)
 	shadow_fbo_spot->setDepthOnly(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height);
 
 	gbuffer_fbo = new GFX::FBO();
-	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 3, GL_RGBA, GL_UNSIGNED_BYTE, true);
+	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 4, GL_RGBA, GL_UNSIGNED_BYTE, true);
 
+	ssao_fbo = new GFX::FBO();
+	ssao_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, false);
+	ssao_points = generateSpherePoints(ao_samples, ao_radius, true);
+
+	
 	if (!GFX::Shader::LoadAtlas(shader_atlas_filename))
 		exit(1);
 	GFX::checkGLErrors();
@@ -166,13 +171,81 @@ void Renderer::orderDrawCommands(Camera* cam) {
 void Renderer::renderScene(SCN::Scene* scene, Camera* camera)
 {
 	if (deferred_rendering) {
-		shadow_bias = 0.0003f;
+		shadow_bias = 0.0001f;
 		renderSceneDeferred(scene, camera);
 	}
 	else if(!deferred_rendering) {
 		shadow_bias = 0.0001f;
 		renderSceneForward(scene, camera);
 	}
+}
+
+//=============== AMIENT OCCLUSION ===================
+
+
+std::vector<vec3> Renderer::generateSpherePoints(int num, float radius, bool hemi) {
+	std::vector<vec3> points;
+	points.resize(num);
+	for (int i = 0; i < num; i++) {
+		vec3& p = points[i];
+		float u = random();
+		float v = random();
+		float theta = u * 2.0f * PI;
+		float phi = acos(2.0f * v - 1.0);
+		float r = cbrt(random() * 0.9 + 0.1) * radius;
+		float sinTheta = sin(theta);
+		float cosTheta = cos(theta);
+		float sinPhi = sin(phi);
+		float cosPhi = cos(phi);
+		p.x = r * sinPhi * cosTheta;
+		p.y = r * sinPhi * sinTheta;
+		p.z = r * cosPhi;
+		if (hemi && p.z < 0) {
+			p.z *= -1.0;
+		}
+	}
+	return points;
+}
+
+void Renderer::renderAmbientOcclusion(Camera* camera) {
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+
+	GFX::Mesh* quad = GFX::Mesh::getQuad();
+
+	ssao_fbo->bind();
+
+	GFX::Shader* shader = GFX::Shader::Get("ambient_occlusion_hemi");
+	if (!shader) return;
+
+ 	shader->enable();
+
+	shader->setUniform("u_ao_radius", ao_radius);
+	shader->setUniform("u_ao_samples", ao_samples);
+	shader->setUniform3Array("u_samples_pos", (float*) &ssao_points[0], ao_samples);
+
+
+	mat4 proj = camera->projection_matrix;
+	mat4 inv_proj = proj;
+	inv_proj.inverse();
+
+	shader->setMatrix44("u_p_matrix", proj);
+	shader->setMatrix44("u_inv_p_matrix", inv_proj);
+	shader->setMatrix44("u_v_matrix", camera->view_matrix);
+
+
+	shader->setUniform("u_res_inv", vec2(1.0f / CORE::BaseApplication::instance->window_width, 1.0f / CORE::BaseApplication::instance->window_height));
+
+	shader->setUniform("u_depth_texture", gbuffer_fbo->depth_texture, 0);
+	shader->setUniform("u_gbuffer_normal", gbuffer_fbo->color_textures[3], 1);
+
+	quad->render(GL_TRIANGLES);
+
+	shader->disable();
+	ssao_fbo->unbind();
+
+	glEnable(GL_DEPTH_TEST);
 }
 
 
@@ -292,7 +365,20 @@ void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
 
 	geometryPass(camera);
 
-	lightPass(camera);
+	if(use_ssao) {
+		renderAmbientOcclusion(camera);
+	}
+
+	//lightPass(camera);
+
+	//render traslucent objects:
+	for (sDrawCommand command : transparent_command_list) {
+		//renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
+	}
+
+	ssao_fbo->color_textures[0]->toViewport();
+	//gbuffer_fbo->depth_texture->toViewport();
+
 }
 
 void Renderer::geometryPass(Camera* camera) {
@@ -316,7 +402,12 @@ void Renderer::lightPass(Camera* camera) {
 	GFX::Shader* shader = NULL;
 
 	//chose a shader
-	shader = GFX::Shader::Get("lightpass");
+	if (!use_pbr) {
+		shader = GFX::Shader::Get("lightpass");
+	}
+	else {
+		shader = GFX::Shader::Get("deferred_PBR_lightpass");
+	}
 
 	assert(glGetError() == GL_NO_ERROR);
 
@@ -392,6 +483,7 @@ void Renderer::lightPass(Camera* camera) {
 	shader->setTexture("u_gbuffer_albedo", gbuffer_fbo->color_textures[0], 4);
 	shader->setTexture("u_gbuffer_normal", gbuffer_fbo->color_textures[1], 5);
 	shader->setTexture("u_gbuffer_depth", gbuffer_fbo->depth_texture, 6);
+	shader->setTexture("u_gbuffer_metallic_roughness", gbuffer_fbo->color_textures[2], 7);
 
 	shader->setUniform("u_res_inv", vec2(1.0f / CORE::BaseApplication::instance->window_width, 1.0f / CORE::BaseApplication::instance->window_height));
 	shader->setMatrix44("u_inv_vp_mat", camera->inverse_viewprojection_matrix);
@@ -428,7 +520,12 @@ void Renderer::renderMeshWithMaterialGeometry(const Matrix44 model, GFX::Mesh* m
 	glColorMask(true, true, true, true);
 
 	//chose a shader
-	shader = GFX::Shader::Get("geometry");
+	if (!use_pbr) {
+		shader = GFX::Shader::Get("geometry");
+	}
+	else {
+		shader = GFX::Shader::Get("deferred_PBR_geometry");
+	}
 
 	assert(glGetError() == GL_NO_ERROR);
 
@@ -443,6 +540,12 @@ void Renderer::renderMeshWithMaterialGeometry(const Matrix44 model, GFX::Mesh* m
 	shader->setUniform("u_model", model);
 	if (material->textures[NORMALMAP].texture) {
 		shader->setUniform("u_normal_texture", material->textures[NORMALMAP].texture, 1);
+	}
+
+	//bind the metallic_roughness texture if we are using PBR
+	if (use_pbr) {
+		if (material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture != NULL)
+			shader->setUniform("u_metallic_roughness_texture", material->textures[SCN::eTextureChannel::METALLIC_ROUGHNESS].texture, 4);
 	}
 
 	// Upload camera uniforms
@@ -863,6 +966,11 @@ void Renderer::showUI()
 	ImGui::Checkbox("Forward Facing Culling", &ffc);
 	ImGui::DragFloat("Shadow Bias", &shadow_bias, 0.0001f, 0.0f, 0.5f, "%.0001f");
 	ImGui::Checkbox("Physically Based Renderer", &use_pbr);
+
+	ImGui::Text("Ambient Occlusion parameters:");
+	ImGui::Checkbox("Use SSAO", &use_ssao);
+	ImGui::DragFloat("AO Samples", &ao_samples, 1.0f, 1.0f, 64.0f, "%.0f");
+	//ImGui::DragFloat("AO Radius", &ao_radius, 0.01f, 0.001f, 1.01f, "%.001f");
 }
 
 #else

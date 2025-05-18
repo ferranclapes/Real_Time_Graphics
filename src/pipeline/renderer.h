@@ -40,13 +40,21 @@ namespace SCN {
 		bool use_multipass;
 		bool ffc;
 		float shadow_bias = 0.0001f;
-		bool deferred_rendering = false;
+		bool deferred_rendering = true;
 		bool use_pbr = true;
+		bool use_ssao = true;
+		float ao_samples = 32.0f;
+		float ao_radius = 0.05f;
 
 		std::vector<SCN::sDrawCommand> draw_command_list;
 		std::vector<SCN::sDrawCommand> opaque_command_list;
 		std::vector<SCN::sDrawCommand> transparent_command_list;
 
+		std::vector<vec3> ssao_points;
+
+
+		//============ AMBIENT OCCLUSION ===================
+		GFX::FBO* ssao_fbo;
 
 		//================ SHADOWS =========================
 		GFX::FBO* shadow_fbo;
@@ -82,6 +90,8 @@ namespace SCN {
 
 		void orderDrawCommands(Camera* cam);
 
+		std::vector <vec3> generateSpherePoints(int num, float radius, bool hemi);
+
 		//renders several elements of the scene
 		void renderScene(SCN::Scene* scene, Camera* camera);
 		void renderSceneForward(SCN::Scene* scene, Camera* camera);
@@ -89,11 +99,12 @@ namespace SCN {
 
 		void geometryPass(Camera* camera);
 		void lightPass(Camera* camera);
-		void lightPassDebug(Camera* camera);
 
 		void renderRenderable();
 		void renderShadowMap();
 		void renderPlain(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
+
+		void renderAmbientOcclusion(Camera* camera);
 
 		//render the skybox
 		void renderSkybox(GFX::Texture* cubemap);

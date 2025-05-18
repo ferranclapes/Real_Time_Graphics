@@ -12,6 +12,10 @@ geometry basic.vs gbuffer_fill.fs
 lightpass quad.vs lightpass.fs
 forward_PBR_singlepass basic.vs forward_PBR_singlepass.fs
 forward_PBR_multipass basic.vs forward_PBR_multipass.fs
+deferred_PBR_geometry basic.vs deferred_PBR_geometry.fs
+deferred_PBR_lightpass quad.vs deferred_PBR_lightpass.fs
+ambient_occlusion quad.vs ambient_occlusion.fs
+ambient_occlusion_hemi quad.vs ambient_occlusion_hemi.fs
 compute test.cs
 
 \test.cs
@@ -543,6 +547,7 @@ uniform vec3 u_camera_pos;
 
 layout(location = 0) out vec4 gbuffer_albedo;
 layout(location = 1) out vec4 gbuffer_normal_mat;
+layout(location = 3) out vec4 gbuffer_normal; // store normal without perturbation
 out vec4 FragColor;
 
 
@@ -561,6 +566,7 @@ void main()
 
     gbuffer_albedo = vec4(color.rgb, 1.0); // store only the color
 	gbuffer_normal_mat = vec4(normalize(normal) * 0.5 + 0.5, 1.0); // store normal encoded in 0..1 range
+	gbuffer_normal = vec4(normalize(v_normal) * 0.5 + 0.5 , 1.0); //store normal without perturbation
 
 	FragColor = vec4(vec3(gl_FragCoord.z), 1.0);
 }
@@ -1056,6 +1062,225 @@ void main()
 	FragColor = vec4(lit_color, color.a);
 }
 
+//=======================================================================================================================
+\deferred_PBR_geometry.fs
+#version 330 core
+#include "pertubnormals"
+
+in vec3 v_position;
+in vec3 v_world_position;
+in vec3 v_normal;
+in vec2 v_uv;
+in vec4 v_color;
+
+uniform vec4 u_color;
+uniform sampler2D u_texture;
+uniform sampler2D u_normal_texture;
+uniform float u_time;
+uniform float u_alpha_cutoff;
+
+
+uniform float u_material_shine;
+uniform vec3 u_camera_pos;
+
+uniform sampler2D u_metallic_roughness_texture;
+
+layout(location = 0) out vec4 gbuffer_albedo;
+layout(location = 1) out vec4 gbuffer_normal_mat;
+layout(location = 2) out vec4 gbuffer_metallic_roughness;
+layout(location = 3) out vec4 gbuffer_normal;
+out vec4 FragColor;
+
+
+void main()
+{
+    vec4 color = u_color * texture(u_texture, v_uv);
+
+    vec3 texture_normal = texture(u_normal_texture, v_uv).xyz;
+    texture_normal = (texture_normal * 2.0) - 1.0;
+    texture_normal = normalize(texture_normal);
+    vec3 normal = perturbNormal(normalize(v_normal), v_world_position, v_uv, texture_normal);
+
+	vec4 metallic_roughness = texture(u_metallic_roughness_texture, v_uv);
+
+    if(color.a < u_alpha_cutoff) {
+        //discard;
+    }
+
+    gbuffer_albedo = vec4(color.rgb, 1.0); // store only the color
+	gbuffer_normal_mat = vec4(normalize(normal) * 0.5 + 0.5, 1.0); // store normal encoded in 0..1 range
+	gbuffer_metallic_roughness = vec4(metallic_roughness.rgb, 1.0); // store metallic and roughness
+	gbuffer_normal = vec4(normalize(v_normal) * 0.5 + 0.5 , 1.0); //store normal without perturbation
+
+	FragColor = vec4(vec3(gl_FragCoord.z), 1.0);
+}
+
+
+//======================================================================================================================
+\deferred_PBR_lightpass.fs
+#version 330 core
+#include "PBR_functions"
+
+in vec2 v_uv;
+
+uniform vec4 u_color;
+uniform sampler2D u_texture;
+uniform sampler2D u_normal_texture;
+uniform float u_time;
+uniform float u_alpha_cutoff;
+
+uniform vec3 u_light_ambient;
+
+uniform vec3 u_light_pos[10];
+uniform vec3 u_light_color[10];
+uniform float u_light_int[10];
+uniform vec3 u_light_dir[10];
+uniform int u_light_count;
+uniform int u_light_type[10];
+uniform float u_light_min[10];
+uniform float u_light_max[10];
+
+uniform float u_light_cone_max[10];	//FOR SPOT LIGHTS
+uniform float u_light_cone_min[10];		//FOR SPOT LIGHTS
+
+//FOR SHADOWS
+uniform sampler2D u_shadow_map[2];
+uniform mat4 u_light_vp[2];
+uniform float u_light_bias;
+
+uniform float u_material_shine;
+uniform vec3 u_camera_pos;
+
+//FROM THE DEFERRED RENDERING
+uniform vec2 u_res_inv;
+uniform mat4 u_inv_vp_mat;
+uniform sampler2D u_gbuffer_albedo;
+uniform sampler2D u_gbuffer_normal;
+uniform sampler2D u_gbuffer_depth;
+uniform sampler2D u_gbuffer_metallic_roughness;
+
+out vec4 FragColor;
+
+void main()
+{
+
+	//================ GET UV AND RECONSTRUCT POSITION ===================
+	vec2 uv = gl_FragCoord.xy * u_res_inv;
+
+	float depth = texture(u_gbuffer_depth, uv).r;
+
+	float depth_clip = depth * 2.0 - 1.0;
+
+	vec2 uv_clip = uv * 2.0 - 1.0;
+	vec4 clip_coords = vec4(uv_clip.x, uv_clip.y, depth_clip, 1.0);
+
+	vec4 not_norm_w_p = u_inv_vp_mat * clip_coords;
+	vec3 world_pos = not_norm_w_p.xyz / not_norm_w_p.w;
+	//====================================================================
+
+	
+	vec3 normal = texture(u_gbuffer_normal, v_uv).xyz * 2.0 - 1.0;
+
+	
+	if (depth == 1.0) {
+    // Fragment is part of the skybox — skip lighting
+    discard;
+	}
+
+	vec4 color = texture( u_gbuffer_albedo, uv);
+
+	vec4 metallic_roughness = texture(u_gbuffer_metallic_roughness, uv);
+
+	vec3 light_component = vec3(0.0, 0.0, 0.0);
+
+	light_component += u_light_ambient * color.rgb;
+
+	for(int i = 0; i < u_light_count; i++){
+
+		if(u_light_type[i] == 1) {										//POINT
+			float dist = abs(distance(u_light_pos[i], world_pos));
+			float attenuation = 1.0 / pow(dist, 2);
+			vec3 L = normalize(u_light_pos[i] - world_pos);
+			vec3 R = normalize(reflect(-L, normalize(normal)));
+			vec3 V = normalize(u_camera_pos - world_pos);
+			vec3 H = normalize(L + V);
+
+			vec3 specular = cookTorranceBRDF(L, V, normal, H, metallic_roughness.g, metallic_roughness.b, color);
+
+
+			light_component += u_light_int[i] * attenuation * u_light_color[i] * ((color.rgb/3.141592) + specular);
+
+
+		} else if (u_light_type[i] == 2) {								//SPOT
+
+			//======================== SHADOWS ==========================
+			vec4 shadow_coord = u_light_vp[0] * vec4(world_pos, 1.0);
+			shadow_coord.z -= u_light_bias;		//Apply bias before dividing by w
+			shadow_coord /= shadow_coord.w;
+			vec2 shadow_uv = shadow_coord.xy * 0.5 + 0.5;
+			float current_depth = shadow_coord.z * 0.5 + 0.5;
+			float closest_depth = texture(u_shadow_map[0], shadow_uv).r;
+			float shadow = current_depth > closest_depth ? 0 : 1.0;
+			//==========================================================
+
+			float dist = distance(u_light_pos[i], world_pos);
+			float attenuation = 1.0 / pow(dist, 2);
+			vec3 L = normalize(u_light_pos[i] - world_pos);
+			vec3 D = normalize(u_light_dir[i]);
+			vec3 R = normalize(reflect(-L, normalize(normal)));
+			vec3 V = normalize(u_camera_pos - world_pos);
+			vec3 H = normalize(L + V);
+
+			if(dot(L, D) < u_light_cone_max[i]) {	//check if the pixel is within the cone
+				continue;
+			}
+
+
+
+			float cone_factor = (clamp(dot(L, D) , 0.0, 1.0) - (u_light_cone_max[i])) / (u_light_cone_min[i] - u_light_cone_max[i]);
+
+			float spot_intensity = u_light_int[i] * attenuation * cone_factor;
+
+			vec3 specular = cookTorranceBRDF(L, V, normal, H, metallic_roughness.g, metallic_roughness.b, color);
+
+			light_component += spot_intensity * u_light_color[i] * shadow* ((color.rgb/3.141592) + specular);
+
+
+		} else if (u_light_type[i] == 3) {								//DIRECTIONAL
+			//======================== SHADOWS ==========================
+			vec4 shadow_coord = u_light_vp[1] * vec4(world_pos, 1.0);
+			shadow_coord.z -= u_light_bias;		//Apply bias before dividing by w
+			shadow_coord /= shadow_coord.w;
+			vec2 shadow_uv = shadow_coord.xy * 0.5 + 0.5;
+			float current_depth = shadow_coord.z * 0.5 + 0.5;
+			float closest_depth = texture(u_shadow_map[1], shadow_uv).r;
+			float shadow = current_depth > closest_depth ? 0 : 1.0;
+			//==========================================================
+
+
+			vec3 L = normalize(u_light_dir[i]);
+			vec3 R = normalize(reflect(-L, normalize(normal)));
+			vec3 V = normalize(u_camera_pos - world_pos);
+			vec3 H = normalize(L + V);
+
+			vec3 specular = cookTorranceBRDF(L, V, normal, H, metallic_roughness.g, metallic_roughness.b, color);
+
+			light_component += u_light_int[i] * u_light_color[i] * shadow * ((color.rgb/3.141592) + specular);
+		}
+
+
+		
+	}
+
+	if(color.a < u_alpha_cutoff) {
+		discard;
+	}
+
+	vec3 lit_color = color.rgb * light_component;
+	FragColor = vec4(lit_color, color.a);
+	
+}
+
 
 //========================================================================================================================
 \PBR_functions
@@ -1113,22 +1338,152 @@ mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
     vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
 
-    T = normalize(T);
-    B = normalize(B);
-    N = normalize(N);
-
-    mat3 tbn = mat3(T, B, N);
-    
-    // Ensure right-handed TBN
-    if (dot(cross(T, B), N) < 0.0)
-        tbn[2] = -tbn[2]; // flip Z to fix handedness
-
-    return tbn;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+	return mat3(T * invmax, B * invmax, N);
 }
 
 
 vec3 perturbNormal(vec3 N, vec3 WP, vec2 uv, vec3 normal_pixel) {
-	//normal_pixel = normal_pixel * 255./127. - 128./127.;
+
 	mat3 TBN = cotangentFrame(N, WP, uv);
 	return normalize(TBN * normal_pixel);
+}
+
+//========================================================================================================================
+\ambient_occlusion.fs
+#version 330 core
+
+in vec2 v_uv;
+
+uniform float u_ao_radius;
+uniform float u_ao_samples;
+uniform vec3[64] u_samples_pos;
+
+uniform mat4 u_p_matrix;
+uniform mat4 u_inv_p_matrix;
+uniform mat4 u_v_matrix;
+
+uniform vec2 u_res_inv;
+
+uniform sampler2D u_depth_texture;
+uniform sampler2D u_gbuffer_normal;
+
+layout(location = 0) out vec4 FragColor;
+
+
+void main() {
+	//================ GET UV AND CLIP COORDINATES ===================
+	vec2 uv = v_uv + 0.5 * u_res_inv;
+
+	float depth = texture(u_depth_texture, uv).r;
+
+	if(depth >= 1.0) {
+		FragColor = vec4(1.0);
+		return;
+	}
+
+	vec4 clip_coords = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+	vec4 view_sample_origin = u_inv_p_matrix * clip_coords;
+	view_sample_origin /= view_sample_origin.w;
+	//====================================================================
+
+	float ao_term = 0.0;
+	for(int i = 0; i < u_ao_samples; i++) {
+		vec3 view_sample = u_samples_pos[i];
+		view_sample *= u_ao_radius;
+		view_sample += view_sample_origin.xyz;
+
+		vec4 proj_sample = u_p_matrix * vec4(view_sample, 1.0);
+		proj_sample /= proj_sample.w;
+		vec2 sample_uv = proj_sample.xy * 0.5 + 0.5;
+
+		float sample_depth = texture(u_depth_texture, sample_uv).r;
+
+		proj_sample.z = proj_sample.z * 0.5 + 0.5;
+		
+		if(sample_depth < proj_sample.z) {
+			ao_term += 1.0;
+}
+
+		
+	}
+	ao_term /= u_ao_samples;
+	FragColor = vec4(ao_term, ao_term, ao_term, 1.0);
+
+
+}
+
+
+//========================================================================================================================
+\ambient_occlusion_hemi.fs
+#version 330 core
+
+in vec2 v_uv;
+
+uniform float u_ao_radius;
+uniform float u_ao_samples;
+uniform vec3[64] u_samples_pos;
+
+uniform mat4 u_p_matrix;
+uniform mat4 u_inv_p_matrix;
+uniform mat4 u_v_matrix;
+
+uniform vec2 u_res_inv;
+
+uniform sampler2D u_depth_texture;
+uniform sampler2D u_gbuffer_normal;
+
+layout(location = 0) out vec4 FragColor;
+
+
+void main() {
+	//================ GET UV AND CLIP COORDINATES ===================
+	vec2 uv = v_uv + 0.5 * u_res_inv;
+
+	float depth = texture(u_depth_texture, uv).r;
+
+	if(depth >= 1.0) {
+		FragColor = vec4(1.0);
+		return;
+	}
+
+	vec4 clip_coords = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+	vec4 view_sample_origin = u_inv_p_matrix * clip_coords;
+	view_sample_origin /= view_sample_origin.w;
+	//====================================================================
+
+	vec3 normal = texture(u_gbuffer_normal, uv).xyz * 2.0 - 1.0;
+	normal = (u_v_matrix * vec4(normal, 0.0)).xyz;
+
+	vec3 v = vec3(0.0, 1.0, 0.0);
+
+	vec3 T = normalize(v - normal * dot(v, normal));
+	vec3 B = cross(normal, T);
+
+	mat3 rotmat = mat3(T, B, normal);
+
+	float ao_term = 0.0;
+	for(int i = 0; i < u_ao_samples; i++) {
+		vec3 view_sample = rotmat * u_samples_pos[i];
+		view_sample *= u_ao_radius;
+		view_sample += view_sample_origin.xyz;
+
+		vec4 proj_sample = u_p_matrix * vec4(view_sample, 1.0);
+		proj_sample /= proj_sample.w;
+		vec2 sample_uv = proj_sample.xy * 0.5 + 0.5;
+
+		float sample_depth = texture(u_depth_texture, sample_uv).r;
+
+		proj_sample.z = proj_sample.z * 0.5 + 0.5;
+		
+		if(sample_depth < proj_sample.z) {
+			ao_term += 1.0;
+}
+
+		
+	}
+	ao_term /= u_ao_samples;
+	FragColor = vec4(ao_term, ao_term, ao_term, 1.0);
+
+
 }
