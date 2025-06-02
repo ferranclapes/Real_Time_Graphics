@@ -38,13 +38,14 @@ namespace SCN {
 		bool render_wireframe;
 		bool render_boundaries;
 		bool use_multipass;
-		bool ffc;
+		bool ffc = false;
 		float shadow_bias = 0.0001f;
 		bool deferred_rendering = true;
-		bool use_pbr = true;
-		bool use_ssao = true;
+		bool use_pbr = false;
+		bool use_ssao = false;
 		float ao_samples = 32.0f;
 		float ao_radius = 0.05f;
+		bool use_hdr = true;
 
 		std::vector<SCN::sDrawCommand> draw_command_list;
 		std::vector<SCN::sDrawCommand> opaque_command_list;
@@ -52,6 +53,13 @@ namespace SCN {
 
 		std::vector<vec3> ssao_points;
 
+		std::vector<vec3> rsm_points;
+
+		//============ REFLECTIVE SHADOW MAP ===============
+		GFX::FBO* rsm_fbo_dir;
+		GFX::FBO* rsm_fbo_spot;
+
+		GFX::FBO* indirect_fbo;
 
 		//============ AMBIENT OCCLUSION ===================
 		GFX::FBO* ssao_fbo;
@@ -68,6 +76,7 @@ namespace SCN {
 
 		//================ DEFERRED RENDERING ==========================
 		GFX::FBO* gbuffer_fbo;
+		GFX::FBO* lightpass_fbo;
 
 		//==============================================================
 
@@ -91,6 +100,7 @@ namespace SCN {
 		void orderDrawCommands(Camera* cam);
 
 		std::vector <vec3> generateSpherePoints(int num, float radius, bool hemi);
+		void generateSamplingPointsRSM(int num);
 
 		//renders several elements of the scene
 		void renderScene(SCN::Scene* scene, Camera* camera);
@@ -99,10 +109,13 @@ namespace SCN {
 
 		void geometryPass(Camera* camera);
 		void lightPass(Camera* camera);
+		void indirectPass(Camera* camera);
 
 		void renderRenderable();
 		void renderShadowMap();
 		void renderPlain(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
+		void renderReflectiveShadowMap();
+		void renderPlainRSM(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SCN::Material* material, vec3 light_color);
 
 		void renderAmbientOcclusion(Camera* camera);
 
@@ -111,7 +124,7 @@ namespace SCN {
 		void renderSkyboxDeferred(GFX::Texture* cubemap);
 
 		//to render one mesh given its material and transformation matrix
-		void renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
+		void renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material, bool deferred);
 		void renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);
 
 		void renderMeshWithMaterialGeometry(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material);

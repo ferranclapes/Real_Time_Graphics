@@ -40,10 +40,21 @@ Renderer::Renderer(const char* shader_atlas_filename)
 
 	gbuffer_fbo = new GFX::FBO();
 	gbuffer_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 4, GL_RGBA, GL_UNSIGNED_BYTE, true);
+	lightpass_fbo = new GFX::FBO();
+	lightpass_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, true);
 
 	ssao_fbo = new GFX::FBO();
 	ssao_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, false);
-	ssao_points = generateSpherePoints(ao_samples, ao_radius, true);
+	ssao_points = generateSpherePoints(64, ao_radius, true);
+
+	//RSM FBO
+	rsm_fbo_dir = new GFX::FBO();
+	rsm_fbo_dir->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 3, GL_RGBA, GL_FLOAT, true);
+	rsm_fbo_spot = new GFX::FBO();
+	rsm_fbo_spot->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 3, GL_RGBA, GL_FLOAT, true);
+	indirect_fbo = new GFX::FBO();
+	indirect_fbo->create(CORE::BaseApplication::instance->window_width, CORE::BaseApplication::instance->window_height, 1, GL_RGBA, GL_UNSIGNED_BYTE, true);
+	generateSamplingPointsRSM(200); // Generate sampling points for RSM
 
 	
 	if (!GFX::Shader::LoadAtlas(shader_atlas_filename))
@@ -282,7 +293,6 @@ void Renderer::renderShadowMap() {
 			//Create the light camera
 			Camera light_camera;
 			light_camera = light->getCameraFromLight(shadow_fbo_spot->width, shadow_fbo_spot->height);
-			//Camera::current = &light_camera;
 
 			// Save this light VP matrix for the main shader
 			shadow_casters[i].light_vp = light_camera.viewprojection_matrix;
@@ -350,6 +360,177 @@ void Renderer::renderPlain(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SC
 }
 
 
+//=================== RSM ===========================
+
+void Renderer::renderReflectiveShadowMap() {
+
+	if (!rsm_fbo_dir && !rsm_fbo_spot)
+		return;
+
+	glEnable(GL_CULL_FACE);
+	glFrontFace(GL_CCW);
+	glEnable(GL_DEPTH_TEST);
+
+	//Bind the FBO for shadow rendering
+
+	for (sShadowCaster s : shadow_casters) {
+		LightEntity* light = s.light;
+		if (light->light_type == eLightType::POINT) {
+			continue; // RSM does not supports point lights
+		}
+		if (light->light_type == eLightType::SPOT) {
+			rsm_fbo_spot->bind();
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			//Create the light camera
+			Camera light_camera;
+			light_camera = light->getCameraFromLight(rsm_fbo_spot->width, rsm_fbo_spot->height);
+
+			// Save this light VP matrix for the main shader
+			s.light_vp = light_camera.viewprojection_matrix;
+
+			// Render all opaque geometry to depth
+			for (sDrawCommand command : opaque_command_list) {
+				renderPlainRSM(light_camera, command.model, command.mesh, command.material, light->color);
+			}
+			//s.shadow_map = rsm_fbo_spot->color_textures[0]; // Store the shadow map texture
+			//s.light_vp = light_camera.viewprojection_matrix;
+
+			rsm_fbo_spot->unbind();
+		}
+		else {
+			rsm_fbo_dir->bind();
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			//Create the light camera
+			Camera light_camera;
+			light_camera = light->getCameraFromLight(rsm_fbo_dir->width, rsm_fbo_dir->height);
+			// Save this light VP matrix for the main shader
+			s.light_vp = light_camera.viewprojection_matrix;
+			// Render all opaque geometry to depth
+			for (sDrawCommand command : opaque_command_list) {
+				renderPlainRSM(light_camera, command.model, command.mesh, command.material, light->color);
+			}
+			//s.shadow_map = rsm_fbo_dir->color_textures[0]; // Store the shadow map texture
+			//s.light_vp = light_camera.viewprojection_matrix;
+
+			rsm_fbo_dir->unbind();
+		}
+	}
+
+	glDisable(GL_CULL_FACE);
+	glFrontFace(GL_CCW);
+}
+
+void Renderer::renderPlainRSM(Camera light_cam, Matrix44 model, GFX::Mesh* mesh, SCN::Material* material, vec3 light_color) {
+
+	// Use plain shader
+	GFX::Shader* plain_shader = GFX::Shader::Get("plain_rsm");
+	if (!plain_shader) return;
+	plain_shader->enable();
+
+	plain_shader->setUniform("u_model", model);
+	plain_shader->setUniform("u_viewprojection", light_cam.viewprojection_matrix);
+	if (material->textures[ALBEDO].texture) {
+		plain_shader->setUniform("u_albedo_texture", material->textures[ALBEDO].texture, 4);
+	}
+	plain_shader->setUniform3("u_light_color", light_color);
+	mesh->render(GL_TRIANGLES);
+
+	plain_shader->disable();
+}
+
+void Renderer::generateSamplingPointsRSM(int num) {
+	rsm_points.clear();
+	rsm_points.resize(num);
+
+	for (int i = 0; i < num; i++) {
+		vec3& p = rsm_points[i];
+		float xi1 = random();  // Uniform in [0, 1]
+		float xi2 = random();  // Uniform in [0, 1]
+
+		float r = xi1; // Unit radius
+		float theta = 2.0f * PI * xi2;
+
+		p.x = r * sin(theta);
+		p.y = r * cos(theta);
+		p.z = r;
+	}
+}
+
+void Renderer::indirectPass(Camera* camera) {
+
+
+	indirect_fbo->bind();
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ONE); // Additive blending
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+
+	GFX::Mesh* quad = GFX::Mesh::getQuad();
+
+	GFX::Shader* shader = GFX::Shader::Get("indirect");
+	if (!shader) return;
+
+	shader->enable();
+	//SET PARAMETERS FOR DIRECTIONAL LIGHT
+	
+	mat4 light_vp_dir;
+	mat4 light_vp_spot;
+	for (sShadowCaster s : shadow_casters) {
+		if (s.light->light_type == eLightType::DIRECTIONAL)
+			light_vp_dir = s.light_vp;
+		else if (s.light->light_type == eLightType::SPOT) {
+			light_vp_spot = s.light_vp;
+		}
+	}
+	shader->setUniform("lightViewProjMatrix", light_vp_dir);
+
+	shader->setTexture("u_rsm_depth", rsm_fbo_dir->depth_texture, 0);
+	shader->setTexture("u_rsm_position", rsm_fbo_dir->color_textures[0], 1);
+	shader->setTexture("u_rsm_normal", rsm_fbo_dir->color_textures[1], 2);
+	shader->setTexture("u_rsm_flux", rsm_fbo_dir->color_textures[2], 3);
+
+	shader->setUniform("u_is_dir", true);
+
+	//SET GENERAL PARAMETERS
+	shader->setUniform3Array("u_samples_pos", (float*)&rsm_points[0], min(rsm_points.size(), 1000));
+	shader->setUniform("u_sample_radius", (float)0.005);
+	shader->setUniform("u_sample_count", (int)min(rsm_points.size(), 1000));
+	shader->setUniform2("u_texel_size", 
+		1.0f / (float)CORE::BaseApplication::instance->window_width, 
+		1.0f / (float)CORE::BaseApplication::instance->window_height);
+
+	shader->setTexture("u_gbuffer_normal", gbuffer_fbo->color_textures[3], 4);
+	shader->setTexture("u_gbuffer_depth", gbuffer_fbo->depth_texture, 5);
+	shader->setMatrix44("u_inv_vp_mat", camera->inverse_viewprojection_matrix);
+
+	//RENDER FOR DIRECTIONAL
+	quad->render(GL_TRIANGLES);
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	//SET PARAMETERS FOR SPOT LIGHT
+	shader->setUniform("lightViewProjMatrix", light_vp_spot);
+
+	shader->setTexture("u_rsm_depth", rsm_fbo_spot->depth_texture, 0);
+	shader->setTexture("u_rsm_position", rsm_fbo_spot->color_textures[0], 1);
+	shader->setTexture("u_rsm_normal", rsm_fbo_spot->color_textures[1], 2);
+	shader->setTexture("u_rsm_flux", rsm_fbo_spot->color_textures[2], 3);
+
+	shader->setUniform("u_is_dir", false);
+
+
+	//RENDER FOR SPOT
+	//quad->render(GL_TRIANGLES);
+
+	shader->disable();
+	indirect_fbo->unbind();
+
+	glEnable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+}
+
 //================= DEFERRED RENDERING ================
 
 void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
@@ -358,6 +539,7 @@ void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
 	parseSceneEntities(scene, camera);
 
 	renderShadowMap();
+	renderReflectiveShadowMap();
 
 	//render skybox
 	if (skybox_cubemap)
@@ -365,19 +547,22 @@ void Renderer::renderSceneDeferred(SCN::Scene* scene, Camera* camera) {
 
 	geometryPass(camera);
 
+	indirectPass(camera);
+
 	if(use_ssao) {
 		renderAmbientOcclusion(camera);
 	}
 
-	//lightPass(camera);
+	lightPass(camera);
+
 
 	//render traslucent objects:
 	for (sDrawCommand command : transparent_command_list) {
-		//renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
+		renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material, true);
 	}
 
-	ssao_fbo->color_textures[0]->toViewport();
-	//gbuffer_fbo->depth_texture->toViewport();
+	//lightpass_fbo->color_textures[0]->toViewport();
+	indirect_fbo->color_textures[0]->toViewport();
 
 }
 
@@ -395,6 +580,12 @@ void Renderer::geometryPass(Camera* camera) {
 }
 
 void Renderer::lightPass(Camera* camera) {
+
+	gbuffer_fbo->depth_texture->copyTo(lightpass_fbo->depth_texture);
+
+	lightpass_fbo->bind();
+
+	glClear(GL_COLOR_BUFFER_BIT);  
 
 	GFX::Mesh* quad = GFX::Mesh::getQuad();
 
@@ -485,6 +676,9 @@ void Renderer::lightPass(Camera* camera) {
 	shader->setTexture("u_gbuffer_depth", gbuffer_fbo->depth_texture, 6);
 	shader->setTexture("u_gbuffer_metallic_roughness", gbuffer_fbo->color_textures[2], 7);
 
+	//For RSM:
+	shader->setTexture("u_indirect_texture", indirect_fbo->color_textures[0], 8);
+
 	shader->setUniform("u_res_inv", vec2(1.0f / CORE::BaseApplication::instance->window_width, 1.0f / CORE::BaseApplication::instance->window_height));
 	shader->setMatrix44("u_inv_vp_mat", camera->inverse_viewprojection_matrix);
 
@@ -496,11 +690,23 @@ void Renderer::lightPass(Camera* camera) {
 		shader->setUniform("u_light_bias", shadow_bias);
 	}
 
+	//for ssao:
+	if(use_ssao) {
+		shader->setUniform("u_use_ssao", 1);
+		shader->setTexture("u_ssao_texture", ssao_fbo->color_textures[0], 8);
+	}
+	else {
+		shader->setUniform("u_use_ssao", 0);
+	}
+
+	shader->setUniform("u_hdr", use_hdr);
+
 	delete[] light_vp;
 
 	quad->render(GL_TRIANGLES);
 
 	shader->disable();
+	lightpass_fbo->unbind();
 
 }
 
@@ -611,23 +817,27 @@ void Renderer::renderRenderable() {
 			renderMeshWithMaterialMultipass(command.model, command.mesh, command.material);
 		}
 		for (sDrawCommand command : transparent_command_list) {
-			renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
+			renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material, false);
 		}
 	}
 	else {
 		for (sDrawCommand command : draw_command_list) {
-			 renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material);
+			 renderMeshWithMaterialSinglepass(command.model, command.mesh, command.material, false);
 		}
 	}
 }
 
 // Renders a mesh given its transform and material using a single pass shader
-void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material)
+void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh* mesh, SCN::Material* material, bool deferred = false)
 {
 	//in case there is nothing to do
 	if (!mesh || !mesh->getNumVertices() || !material)
 		return;
 	assert(glGetError() == GL_NO_ERROR);
+
+	if (deferred) {
+		lightpass_fbo->bind();
+	}
 
 	//define locals to simplify coding
 	GFX::Shader* shader = NULL;
@@ -741,6 +951,8 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 	shader->setUniform("u_viewprojection", camera->viewprojection_matrix);
 	shader->setUniform("u_camera_position", camera->eye);
 
+	shader->setUniform("u_hdr", use_hdr);
+
 	// Upload time, for cool shader effects
 	float t = getTime();
 	shader->setUniform("u_time", t);
@@ -754,6 +966,10 @@ void Renderer::renderMeshWithMaterialSinglepass(const Matrix44 model, GFX::Mesh*
 
 	//disable shader
 	shader->disable();
+
+	if (deferred) {
+		lightpass_fbo->unbind();
+	}
 
 	//set the render state as it was before to avoid problems with future renders
 	glDisable(GL_BLEND);
@@ -837,6 +1053,9 @@ void Renderer::renderMeshWithMaterialMultipass(const Matrix44 model, GFX::Mesh* 
 
 		if (material->textures[NORMALMAP].texture)
 			shader->setUniform("u_normal_texture", material->textures[NORMALMAP].texture, 1);
+
+
+		shader->setUniform("u_hdr", use_hdr);
 
 		if (render_wireframe)
 			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -971,6 +1190,8 @@ void Renderer::showUI()
 	ImGui::Checkbox("Use SSAO", &use_ssao);
 	ImGui::DragFloat("AO Samples", &ao_samples, 1.0f, 1.0f, 64.0f, "%.0f");
 	//ImGui::DragFloat("AO Radius", &ao_radius, 0.01f, 0.001f, 1.01f, "%.001f");
+
+	ImGui::Checkbox("Use HDR", &use_hdr);
 }
 
 #else
